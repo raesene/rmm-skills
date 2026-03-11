@@ -1,0 +1,24 @@
+{
+  "skill_name": "labctl-playground",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just wrote a Flask app and I want to test it in a clean environment before deploying. The app is in ./my-flask-app and has a Dockerfile. Can you spin up a test environment, build and run it, and confirm it's working?",
+      "expected_output": "Agent starts a docker playground, copies the app, builds and runs the container, verifies the app is responding, and cleans up the playground.",
+      "files": [
+        "my-flask-app/app.py",
+        "my-flask-app/Dockerfile",
+        "my-flask-app/requirements.txt"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I have some Kubernetes manifests in ./k8s/ that I need to test in a real cluster before pushing to prod. Can you set up a cluster and apply them so I can check if everything comes up healthy?",
+      "expected_output": "Agent starts a k3s playground, copies the manifests, applies them, checks pod/service status, reports results, and cleans up the playground.",
+      "files": [
+        "k8s/deployment.yaml",
+        "k8s/service.yaml"
+      ]
+    }
+  ]
+}
