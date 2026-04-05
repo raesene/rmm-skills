@@ -104,7 +104,9 @@ Useful flags:
 
 ### 3. Run commands on the playground
 
-This is the primary way to interact with a running playground. Use `labctl ssh` to execute commands remotely:
+This is the primary way to interact with a running playground. Use `labctl ssh` to execute commands remotely.
+
+**Important:** The default user on playgrounds is `laborant` (home directory `/home/laborant`), not your local username. When using `~` in paths, it resolves to `/home/laborant` on the playground. Use `--user root` when you need root access.
 
 ```bash
 # Interactive shell
