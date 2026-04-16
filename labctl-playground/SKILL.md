@@ -43,7 +43,16 @@ Pick the playground that matches the task. The catalog is available via `labctl 
 | `k3s` | Multi-node K3s cluster (dev-machine + control-plane + 2 workers) |
 | `k3s-bare` | Bare K3s without extras |
 | `k0s` | k0s-based Kubernetes cluster |
+| `k8s-omni` | Kubernetes cluster with selectable container runtime (containerd or CRI-O) |
 | `k8s-client-go` | Kubernetes Go client development |
+
+To start a k8s-omni playground with CRI-O as the container runtime:
+
+```bash
+labctl playground start k8s-omni -i 'Container runtime=cri-o'
+```
+
+The `-i` flag passes interactive parameter overrides. Without it, the default runtime (containerd) is used.
 
 ### Networking
 | Playground | Use for |

@@ -1,6 +1,6 @@
 ---
 name: container-vuln-testing
-description: Test container runtime vulnerabilities (runc, containerd, CRI-O) against the full container stack — from direct runtime invocation through Docker, containerd, Kubernetes API, and node-level access. Use when validating whether a container runtime vulnerability is exploitable through each layer of the stack, or when you need to determine which layers block an exploit and which don't. Triggers on tasks involving container escape testing, runc vulnerability validation, container runtime security research, testing security boundaries between Docker/containerd/Kubernetes and runc, or determining exploitability of OCI runtime bugs across different deployment contexts. Requires labctl for ephemeral test environments.
+description: Test container runtime vulnerabilities (runc, crun, containerd, CRI-O) against the full container stack — from direct runtime invocation through Docker, containerd, Kubernetes API, and node-level access. Use when validating whether a container runtime vulnerability is exploitable through each layer of the stack, or when you need to determine which layers block an exploit and which don't. Triggers on tasks involving container escape testing, runc/crun vulnerability validation, container runtime security research, testing security boundaries between Docker/containerd/CRI-O/Kubernetes and the OCI runtime, or determining exploitability of OCI runtime bugs across different deployment contexts. Requires labctl for ephemeral test environments.
 ---
 
 # Container Vulnerability Testing
@@ -13,6 +13,7 @@ Container runtime vulnerabilities don't exist in isolation. A bug in runc may be
 - **Exploitable** via direct runc invocation but **blocked** by Docker's validation
 - **Blocked** by Kubernetes API admission but **exploitable** from a privileged pod on the node
 - **Accidentally mitigated** by containerd's user resolution logic without anyone realizing it
+- **Not applicable** to CRI-O because it uses crun (a different OCI runtime) instead of runc
 
 Each layer in the stack may independently validate, transform, or block inputs before they reach runc. Testing only one layer gives an incomplete picture. The goal is to map exactly which paths are exploitable and which aren't.
 
@@ -27,14 +28,20 @@ Each layer in the stack may independently validate, transform, or block inputs b
 Test from the **most direct** (closest to runc) to the **most abstracted** (Kubernetes API):
 
 ```
-Layer 1: runc exec directly          (the runtime itself)
-Layer 2: containerd ctr              (container daemon CLI)
+Layer 1: runc/crun exec directly     (the OCI runtime itself)
+Layer 2: containerd ctr / crictl     (container daemon CLI)
 Layer 3: Docker CLI / Docker daemon  (full Docker stack)
 Layer 4: Kubernetes API              (orchestrator layer)
-Layer 5: Kubernetes node-level       (escape back to runc from inside K8s)
+Layer 5: Kubernetes node-level       (escape back to runtime from inside K8s)
 ```
 
 If a vulnerability is blocked at Layer 4, you still need to check Layer 5 — an attacker with node access can bypass the Kubernetes API entirely.
+
+For Kubernetes testing, use `k8s-omni` with two runtime variants:
+- **containerd** (default): uses runc — `labctl playground start k8s-omni`
+- **CRI-O**: uses crun — `labctl playground start k8s-omni -i 'Container runtime=cri-o'`
+
+Test both if the vulnerability targets the OCI runtime spec generically. If it's runc-specific, CRI-O/crun may not be affected (and vice versa).
 
 ## Phase 1: Docker / containerd / Direct runc
 
@@ -146,17 +153,17 @@ labctl ssh "$PLAYGROUND_ID" --user root -- bash -c '
 labctl playground destroy "$PLAYGROUND_ID"
 ```
 
-## Phase 2: Kubernetes
+## Phase 2a: Kubernetes with containerd
 
-Use a `k3s` playground. This gives a multi-node K3s cluster with containerd and runc.
+Use a `k8s-omni` playground (default runtime). This gives a multi-node Kubernetes cluster with containerd and runc.
 
 ### Start the environment
 
 ```bash
-PLAYGROUND_ID=$(labctl playground start k3s --quiet)
+PLAYGROUND_ID=$(labctl playground start k8s-omni --quiet)
 ```
 
-K3s playgrounds have multiple machines. Use `dev-machine` for kubectl:
+k8s-omni playgrounds have multiple machines: `dev-machine`, `cplane-01`, `node-01`, `node-02`. Use `dev-machine` for kubectl:
 
 ```bash
 labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- kubectl get nodes -o wide
@@ -194,8 +201,7 @@ EOF
 **Key points for Kubernetes API testing:**
 - The API server validates many security-relevant fields (runAsUser, capabilities, etc.)
 - Pod Security Standards (PSS) and admission webhooks add more validation
-- Even if the API blocks something, the underlying runc may still be vulnerable via node access
-- Use `busybox` image — alpine images in K3s may lack common utilities like `id`
+- Even if the API blocks something, the underlying runtime may still be vulnerable via node access
 
 ### Layer 5: Node-level runc from inside Kubernetes
 
@@ -259,19 +265,17 @@ EOF
 ```bash
 labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
     kubectl exec runc-tester -- nsenter -t 1 -m -u -i -n -p -- sh -c '\''
-        # Find K3s bundled runc
-        RUNC=$(find /var/lib/rancher/k3s/data -name runc -type f 2>/dev/null | head -1)
         RUNC_ROOT="/run/containerd/runc/k8s.io"
 
-        echo "runc: $($RUNC --version | head -1)"
+        echo "runc: $(runc --version | head -1)"
 
         # Find a container with the test binary available
-        for CID in $($RUNC --root $RUNC_ROOT list -q 2>/dev/null); do
-            if $RUNC --root $RUNC_ROOT exec $CID /bin/id >/dev/null 2>&1; then
+        for CID in $(runc --root $RUNC_ROOT list -q 2>/dev/null); do
+            if runc --root $RUNC_ROOT exec $CID /bin/id >/dev/null 2>&1; then
                 echo "Target container: $CID"
 
                 # Run your exploit test
-                # Example: $RUNC --root $RUNC_ROOT exec --user <value> $CID /bin/id
+                # Example: runc --root $RUNC_ROOT exec --user <value> $CID /bin/id
                 break
             fi
         done
@@ -279,19 +283,215 @@ labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
 '
 ```
 
-**Key points for K3s node-level testing:**
-- K3s bundles runc at `/var/lib/rancher/k3s/data/<hash>/bin/runc` — it's NOT in the standard `$PATH`
-- The runc state directory for K3s containers is `/run/containerd/runc/k8s.io`
+**Key points for k8s-omni (containerd) node-level testing:**
+- runc is at `/usr/local/bin/runc` and is in `$PATH` on worker nodes
+- The runc state directory is `/run/containerd/runc/k8s.io`
 - Use `nsenter -t 1 -m -u -i -n -p` to enter the node's full namespace from a privileged pod
 - A privileged pod with `hostPID: true` is required for nsenter to work
 - Not all container images have the tools you need — use `busybox` which includes `id`, `cat`, `ls`, etc.
-- Alpine images pulled by K3s may be minimal and lack `/bin/id`
 
-### Cleanup Phase 2
+### Cleanup Phase 2a
 
 ```bash
 labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
     kubectl delete pod target-pod runc-tester --force --grace-period=0 2>/dev/null
+'
+labctl playground destroy "$PLAYGROUND_ID"
+```
+
+## Phase 2b: Kubernetes with CRI-O
+
+Use a `k8s-omni` playground with the CRI-O runtime. This is essential for testing runc/crun vulnerabilities through the CRI-O code path, which differs from containerd in how it processes container specs before invoking the OCI runtime.
+
+**Important:** CRI-O uses **crun** as its OCI runtime, not runc. If your vulnerability is runc-specific, it may not apply here. If it targets the OCI runtime spec more broadly, test both.
+
+### Start the environment
+
+```bash
+PLAYGROUND_ID=$(labctl playground start k8s-omni -i 'Container runtime=cri-o' --quiet)
+```
+
+The `-i` flag passes interactive parameter overrides. The machine layout is the same as the containerd variant: `dev-machine`, `cplane-01`, `node-01`, `node-02`.
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- kubectl get nodes -o wide
+```
+
+### Identify versions
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine node-01 --user root -- bash -c '
+    echo "crun:    $(crun --version | head -1)"
+    echo "CRI-O:   $(crictl version 2>/dev/null | grep RuntimeVersion)"
+    echo "Arch:    $(uname -m) ($(getconf LONG_BIT)-bit)"
+'
+```
+
+### Layer 2: CRI-O via crictl
+
+`crictl` is the CRI client that talks directly to CRI-O, bypassing the Kubernetes API but still going through CRI-O's processing before reaching crun.
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine node-01 --user root -- bash -c '
+    # List running pods and containers
+    crictl pods
+    crictl ps
+
+    # Pull an image via CRI-O
+    crictl pull docker.io/library/busybox:latest
+
+    # Run a pod + container via crictl for testing
+    # Create pod config
+    cat > /tmp/pod-config.json <<PODEOF
+{
+    "metadata": { "name": "crictl-test-pod", "namespace": "default", "uid": "crictl-test" },
+    "log_directory": "/tmp/crictl-test-logs"
+}
+PODEOF
+
+    # Create container config
+    cat > /tmp/container-config.json <<CTREOF
+{
+    "metadata": { "name": "crictl-test" },
+    "image": { "image": "docker.io/library/busybox:latest" },
+    "command": ["sleep", "3600"],
+    "log_path": "crictl-test.log"
+}
+CTREOF
+
+    POD_ID=$(crictl runp /tmp/pod-config.json)
+    CTR_ID=$(crictl create "$POD_ID" /tmp/container-config.json /tmp/pod-config.json)
+    crictl start "$CTR_ID"
+
+    # Test your exploit via crictl exec
+    # Example: crictl exec --user <value> "$CTR_ID" id
+    # Replace with your specific vulnerability test
+
+    # Cleanup
+    crictl stop "$CTR_ID"
+    crictl rm "$CTR_ID"
+    crictl stopp "$POD_ID"
+    crictl rmp "$POD_ID"
+'
+```
+
+**Key points for crictl/CRI-O testing:**
+- `crictl` talks to CRI-O via the CRI gRPC API — it's the equivalent of `ctr` for containerd
+- CRI-O may validate or transform fields differently than containerd before invoking crun
+- Use `crictl exec` for exec-based vulnerability tests
+- CRI-O processes user specs through its own logic before passing to the OCI runtime
+
+### Layer 4: Kubernetes API (CRI-O)
+
+The Kubernetes API layer works the same as Phase 2a — use the same pod spec tests. The difference is what happens after the API accepts the spec: CRI-O processes it instead of containerd.
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
+    cat <<EOF | kubectl apply -f - 2>&1
+apiVersion: v1
+kind: Pod
+metadata:
+  name: exploit-test
+spec:
+  securityContext:
+    runAsUser: <EXPLOIT_VALUE>
+  containers:
+  - name: test
+    image: busybox
+    command: ["sleep", "3600"]
+  restartPolicy: Never
+EOF
+
+    kubectl get pod exploit-test -o wide 2>&1
+    kubectl delete pod exploit-test --force --grace-period=0 2>/dev/null
+'
+```
+
+### Layer 5: Node-level crun from inside Kubernetes (CRI-O)
+
+Same privileged-pod approach as Phase 2a, but targeting crun instead of runc.
+
+**Step 1: Create target and tester pods** (same as Phase 2a)
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: target-pod
+spec:
+  containers:
+  - name: target
+    image: busybox
+    command: ["sleep", "3600"]
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runtime-tester
+spec:
+  nodeName: node-01
+  hostPID: true
+  containers:
+  - name: tester
+    image: busybox
+    command: ["sleep", "3600"]
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: host
+      mountPath: /host
+  volumes:
+  - name: host
+    hostPath:
+      path: /
+  restartPolicy: Never
+EOF
+    kubectl wait --for=condition=Ready pod/target-pod pod/runtime-tester --timeout=60s
+'
+```
+
+**Step 2: Access crun from inside the node namespace**
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
+    kubectl exec runtime-tester -- nsenter -t 1 -m -u -i -n -p -- sh -c '\''
+        CRUN="/usr/bin/crun"
+        CRUN_ROOT="/run/crun"
+
+        echo "crun: $($CRUN --version | head -1)"
+
+        # List running containers
+        $CRUN --root $CRUN_ROOT list 2>/dev/null
+
+        # Find a container with the test binary available
+        for CID in $($CRUN --root $CRUN_ROOT list -q 2>/dev/null); do
+            if $CRUN --root $CRUN_ROOT exec $CID /bin/id >/dev/null 2>&1; then
+                echo "Target container: $CID"
+
+                # Run your exploit test
+                # Example: $CRUN --root $CRUN_ROOT exec --user <value> $CID /bin/id
+                break
+            fi
+        done
+    '\''
+'
+```
+
+**Key points for k8s-omni (CRI-O) node-level testing:**
+- CRI-O uses **crun** (`/usr/bin/crun`), not runc — runc-specific bugs may not apply
+- The crun state directory is `/run/crun`
+- crun is a C implementation of the OCI runtime spec, while runc is Go — they handle edge cases differently
+- The same nsenter technique works: privileged pod with `hostPID: true`
+- If testing a vulnerability that affects the OCI runtime spec generically, compare results between Phase 2a (runc) and Phase 2b (crun)
+
+### Cleanup Phase 2b
+
+```bash
+labctl ssh "$PLAYGROUND_ID" --machine dev-machine -- bash -c '
+    kubectl delete pod target-pod runtime-tester --force --grace-period=0 2>/dev/null
 '
 labctl playground destroy "$PLAYGROUND_ID"
 ```
@@ -324,10 +524,9 @@ The default user is `laborant` (home: `/home/laborant`). Use `--user root` for r
 | `runc list` permission denied | Use `--user root` with labctl ssh |
 | Container ID not found by runc | Use full 64-char Docker ID, not short form |
 | `/bin/id` not found in container | Use `busybox` image instead of `alpine` |
-| K3s runc not in PATH | Find it: `find /var/lib/rancher/k3s/data -name runc -type f` |
 | ctr exec-id conflict | Use unique exec-id strings for each exec call |
 | `bash -c` not passing through labctl ssh | Write a script file, copy it, run it |
-| Alpine missing tools in K3s | K3s pulls minimal images; use `busybox:latest` |
+| CRI-O uses crun not runc | Check which OCI runtime the cluster uses before testing runc-specific bugs |
 
 ### Recording results
 
@@ -338,8 +537,11 @@ For each vulnerability test, record a table like this:
 | `runc` direct (version X.Y.Z) | YES/NO | Confirmed/Not tested | Details |
 | `docker exec` | YES/NO | Confirmed/Not tested | Details |
 | `ctr task exec` | YES/NO | Confirmed/Not tested | Details |
-| Kubernetes API (pod spec) | YES/NO | Confirmed/Not tested | Details |
-| K8s node-level runc | YES/NO | Confirmed/Not tested | Details |
+| K8s API (containerd) | YES/NO | Confirmed/Not tested | Details |
+| K8s node-level runc (containerd) | YES/NO | Confirmed/Not tested | Details |
+| `crictl exec` (CRI-O) | YES/NO | Confirmed/Not tested | Details |
+| K8s API (CRI-O) | YES/NO | Confirmed/Not tested | Details |
+| K8s node-level crun (CRI-O) | YES/NO | Confirmed/Not tested | Details |
 
 This makes it clear which layers provide mitigation and which don't.
 
@@ -356,7 +558,7 @@ This makes it clear which layers provide mitigation and which don't.
 │  (user resolution, image pull,      │   (containerd user lookup, Docker
 │   sandbox creation)                 │    daemon UID range check, etc.)
 ├─────────────────────────────────────┤
-│  OCI Runtime (runc)                 │ ← Layer 1: The runtime itself
+│  OCI Runtime (runc / crun)          │ ← Layer 1: The runtime itself
 │  (namespace setup, cgroup config,   │   (often the weakest validation)
 │   exec, signal, delete)             │
 ├─────────────────────────────────────┤
@@ -366,23 +568,26 @@ This makes it clear which layers provide mitigation and which don't.
 └─────────────────────────────────────┘
 ```
 
-A vulnerability in runc (Layer 1) may be blocked by any layer above it, or by the kernel below it. The kernel is the ultimate enforcer — even if runc passes a bad value, the kernel may reject it (e.g., unmapped UIDs in user namespaces). Full testing covers all layers.
+A vulnerability in the OCI runtime (Layer 1) may be blocked by any layer above it, or by the kernel below it. The kernel is the ultimate enforcer — even if runc/crun passes a bad value, the kernel may reject it (e.g., unmapped UIDs in user namespaces). Full testing covers all layers and both runtimes where applicable.
 
-## Reference: runc State Directories
+## Reference: OCI Runtime State Directories
 
-| Container Manager | runc Root Directory |
-|---|---|
-| Docker | `/run/docker/runtime-runc/moby` |
-| K3s (containerd CRI) | `/run/containerd/runc/k8s.io` |
-| containerd (default ns) | `/run/containerd/runc/default` |
-| CRI-O | `/run/runc` |
-| Podman | `/run/user/<uid>/runc` (rootless) or `/run/runc` (rootful) |
+| Container Manager | OCI Runtime | Root Directory |
+|---|---|---|
+| Docker | runc | `/run/docker/runtime-runc/moby` |
+| k8s-omni (containerd) | runc | `/run/containerd/runc/k8s.io` |
+| k8s-omni (CRI-O) | crun | `/run/crun` |
+| containerd (default ns) | runc | `/run/containerd/runc/default` |
+| K3s (containerd CRI) | runc | `/run/containerd/runc/k8s.io` |
+| Podman | runc | `/run/user/<uid>/runc` (rootless) or `/run/runc` (rootful) |
 
-## Reference: runc Binary Locations
+## Reference: OCI Runtime Binary Locations
 
-| Distribution | Path |
-|---|---|
-| Docker (apt/yum) | `/usr/bin/runc` or `/usr/sbin/runc` |
-| K3s (bundled) | `/var/lib/rancher/k3s/data/<hash>/bin/runc` |
-| containerd (standalone) | `/usr/bin/runc` or `/usr/local/bin/runc` |
-| RKE2 (bundled) | `/var/lib/rancher/rke2/data/<hash>/bin/runc` |
+| Distribution | Runtime | Path |
+|---|---|---|
+| Docker (apt/yum) | runc | `/usr/bin/runc` or `/usr/sbin/runc` |
+| k8s-omni (containerd) | runc | `/usr/local/bin/runc` |
+| k8s-omni (CRI-O) | crun | `/usr/bin/crun` |
+| K3s (bundled) | runc | `/var/lib/rancher/k3s/data/<hash>/bin/runc` |
+| containerd (standalone) | runc | `/usr/bin/runc` or `/usr/local/bin/runc` |
+| RKE2 (bundled) | runc | `/var/lib/rancher/rke2/data/<hash>/bin/runc` |
