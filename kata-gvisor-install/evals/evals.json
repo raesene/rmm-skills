@@ -1,0 +1,36 @@
+{
+  "skill_name": "kata-gvisor-install",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I've just stood up a fresh kubeadm cluster for running untrusted CI jobs and I want them sandboxed. Can you add Kata Containers and gVisor to it? Use the defaults where it makes sense, and go ahead and install without checking back with me. The kubeconfig is at {KUBECONFIG} (API is already tunnelled). When you're done tell me which runtimeClassNames I can use and show me they actually work.",
+      "expected_output": "Kata (qemu-runtime-rs default, plus qemu) and gVisor (systrap) installed; RuntimeClasses kata-qemu-runtime-rs, kata-qemu, gvisor exist; a test pod in each shows a non-node kernel (Kata) or gVisor boot; summary lists the RuntimeClass names.",
+      "files": [],
+      "assertions": [
+        "A Kata RuntimeClass exists and an independent probe pod using it is Ready with a guest kernel different from the node kernel",
+        "A gVisor RuntimeClass exists and an independent probe pod using it is Ready and boots gVisor (dmesg 'Starting gVisor')",
+        "A plain runc pod still starts (containerd not broken)",
+        "No leftover test/debug pods outside system namespaces",
+        "Agent checked readiness (node KVM/containerd prerequisites) before installing",
+        "Final answer lists the usable runtimeClassName values",
+        "Final answer includes evidence that each runtime works (kernel/dmesg output)",
+        "Every requested runtime passed its first install/smoke test with no manual workaround (no hand-run helm upgrade, no ad-hoc node fixes beyond documented options)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "for a lab comparison I want firecracker-backed kata pods and gvisor on its kvm platform on my test cluster (kubeconfig: {KUBECONFIG}, tunnel already up). set both up and prove each one is really running in its sandbox. you've got cluster-admin, go for it, don't ask me questions.",
+      "expected_output": "Kata with the fc shim (devmapper thin pool on the worker, lvm2/thin-provisioning-tools handled) and gVisor with platform kvm; RuntimeClasses kata-fc and gvisor-kvm work; evidence: kata-fc pod shows a guest kernel and a firecracker process, gvisor-kvm pod runs runsc with --platform=kvm.",
+      "files": [],
+      "assertions": [
+        "RuntimeClass kata-fc (or another Firecracker-backed RuntimeClass) exists and an independent probe pod using it is Ready with a guest kernel",
+        "A firecracker process is running on the node for the Firecracker probe pod",
+        "A gVisor RuntimeClass with the KVM platform exists and its probe pod runs runsc-sandbox with --platform=kvm",
+        "A plain runc pod still starts (containerd not broken)",
+        "No leftover test/debug pods outside system namespaces",
+        "Final answer includes evidence of the firecracker VMM and the kvm platform",
+        "Every requested runtime passed its first install/smoke test with no manual workaround (no hand-run helm upgrade, no ad-hoc node fixes beyond documented options)"
+      ]
+    }
+  ]
+}
